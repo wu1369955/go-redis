@@ -23,6 +23,7 @@ var (
 	ErrPoolTimeout = errors.New("redis: connection pool timeout")
 )
 
+// 定时任务池
 var timers = sync.Pool{
 	New: func() interface{} {
 		t := time.NewTimer(time.Hour)
@@ -33,11 +34,15 @@ var timers = sync.Pool{
 
 // Stats contains pool state information and accumulated stats.
 type Stats struct {
-	Hits     uint32 // number of times free connection was found in the pool
-	Misses   uint32 // number of times free connection was NOT found in the pool
+	// 线程池命中次数
+	Hits uint32 // number of times free connection was found in the pool
+	// 线程池未命中次数
+	Misses uint32 // number of times free connection was NOT found in the pool
+	// 等待时间次数
 	Timeouts uint32 // number of times a wait timeout occurred
-
+	// 总共连接
 	TotalConns uint32 // number of total connections in the pool
+
 	IdleConns  uint32 // number of idle connections in the pool
 	StaleConns uint32 // number of stale connections removed from the pool
 }
@@ -60,15 +65,15 @@ type Pooler interface {
 type Options struct {
 	Dialer func(context.Context) (net.Conn, error)
 
-	PoolFIFO        bool
-	PoolSize        int
-	DialTimeout     time.Duration
-	PoolTimeout     time.Duration
-	MinIdleConns    int
-	MaxIdleConns    int
-	MaxActiveConns  int
-	ConnMaxIdleTime time.Duration
-	ConnMaxLifetime time.Duration
+	PoolFIFO        bool          //先进先出
+	PoolSize        int           // 线程大小
+	DialTimeout     time.Duration //连接超时时间
+	PoolTimeout     time.Duration //获取连接超时时间
+	MinIdleConns    int           // 最小空闲连接数
+	MaxIdleConns    int           // 最大空闲连接数
+	MaxActiveConns  int           // 最大活动连接数, 0表示无限制
+	ConnMaxIdleTime time.Duration //连接最大空闲时间
+	ConnMaxLifetime time.Duration //连接最大存活时间
 }
 
 type lastDialErrorWrap struct {
@@ -78,19 +83,19 @@ type lastDialErrorWrap struct {
 type ConnPool struct {
 	cfg *Options
 
-	dialErrorsNum uint32 // atomic
-	lastDialError atomic.Value
+	dialErrorsNum uint32       // atomic
+	lastDialError atomic.Value // // 最后一次拨号错误
 
-	queue chan struct{}
+	queue chan struct{} // 队列
 
-	connsMu   sync.Mutex
-	conns     []*Conn
-	idleConns []*Conn
+	connsMu   sync.Mutex // 异步锁
+	conns     []*Conn    // 所有连接
+	idleConns []*Conn    // 所有空闲连接
 
-	poolSize     int
-	idleConnsLen int
+	poolSize     int // 线程池大小
+	idleConnsLen int // 空闲连接数
 
-	stats Stats
+	stats Stats // 统计信息
 
 	_closed uint32 // atomic
 }
@@ -140,6 +145,7 @@ func (p *ConnPool) checkMinIdleConns() {
 	}
 }
 
+// addIdleConn adds a new idle connection to the pool.
 func (p *ConnPool) addIdleConn() error {
 	ctx, cancel := context.WithTimeout(context.Background(), p.cfg.DialTimeout)
 	defer cancel()
@@ -205,6 +211,7 @@ func (p *ConnPool) newConn(ctx context.Context, pooled bool) (*Conn, error) {
 	return cn, nil
 }
 
+// dialConn 创建一个新的连接，如果连接池已关闭或达到最大错误次数则返回错误。
 func (p *ConnPool) dialConn(ctx context.Context, pooled bool) (*Conn, error) {
 	if p.closed() {
 		return nil, ErrClosed
@@ -238,7 +245,7 @@ func (p *ConnPool) tryDial() {
 
 		conn, err := p.cfg.Dialer(ctx)
 		if err != nil {
-			p.setLastDialError(err)
+			p.setLastDialError(err) // 将error 存储到lastDialError中
 			time.Sleep(time.Second)
 			cancel()
 			continue
@@ -251,10 +258,12 @@ func (p *ConnPool) tryDial() {
 	}
 }
 
+// 设置最后一次错误
 func (p *ConnPool) setLastDialError(err error) {
 	p.lastDialError.Store(&lastDialErrorWrap{err: err})
 }
 
+// 获取最后一次错误
 func (p *ConnPool) getLastDialError() error {
 	err, _ := p.lastDialError.Load().(*lastDialErrorWrap)
 	if err != nil {
@@ -275,11 +284,11 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 
 	for {
 		p.connsMu.Lock()
-		cn, err := p.popIdle()
+		cn, err := p.popIdle() // 弹出一个栈顶连接
 		p.connsMu.Unlock()
 
 		if err != nil {
-			p.freeTurn()
+			p.freeTurn() // 释放栈顶连接
 			return nil, err
 		}
 
@@ -287,7 +296,7 @@ func (p *ConnPool) Get(ctx context.Context) (*Conn, error) {
 			break
 		}
 
-		if !p.isHealthyConn(cn) {
+		if !p.isHealthyConn(cn) { // 检查连接是否正常
 			_ = p.CloseConn(cn)
 			continue
 		}
@@ -343,6 +352,7 @@ func (p *ConnPool) waitTurn(ctx context.Context) error {
 	}
 }
 
+// 弹出一个连接，释放栈顶连接
 func (p *ConnPool) freeTurn() {
 	<-p.queue
 }
@@ -357,9 +367,11 @@ func (p *ConnPool) popIdle() (*Conn, error) {
 	}
 
 	var cn *Conn
-	if p.cfg.PoolFIFO {
+	if p.cfg.PoolFIFO { // 先进先出
 		cn = p.idleConns[0]
+		// 通过copy方式删除第一个元素，这是所有元素都移位了
 		copy(p.idleConns, p.idleConns[1:])
+		// 此时栈顶元素为空指针
 		p.idleConns = p.idleConns[:n-1]
 	} else {
 		idx := n - 1
@@ -424,6 +436,7 @@ func (p *ConnPool) removeConnWithLock(cn *Conn) {
 func (p *ConnPool) removeConn(cn *Conn) {
 	for i, c := range p.conns {
 		if c == cn {
+			// 遍历一个数组，删除其中的一个元素，通过数组拼接方式实现
 			p.conns = append(p.conns[:i], p.conns[i+1:]...)
 			if cn.pooled {
 				p.poolSize--
@@ -457,6 +470,7 @@ func (p *ConnPool) IdleLen() int {
 
 func (p *ConnPool) Stats() *Stats {
 	return &Stats{
+		// 将原子操作的统计信息转换为普通值
 		Hits:     atomic.LoadUint32(&p.stats.Hits),
 		Misses:   atomic.LoadUint32(&p.stats.Misses),
 		Timeouts: atomic.LoadUint32(&p.stats.Timeouts),
@@ -467,6 +481,7 @@ func (p *ConnPool) Stats() *Stats {
 	}
 }
 
+// 通过获取原子值来判断连接是否关闭
 func (p *ConnPool) closed() bool {
 	return atomic.LoadUint32(&p._closed) == 1
 }
@@ -487,6 +502,7 @@ func (p *ConnPool) Filter(fn func(*Conn) bool) error {
 }
 
 func (p *ConnPool) Close() error {
+	// 设置关闭状态
 	if !atomic.CompareAndSwapUint32(&p._closed, 0, 1) {
 		return ErrClosed
 	}
@@ -509,18 +525,18 @@ func (p *ConnPool) Close() error {
 
 func (p *ConnPool) isHealthyConn(cn *Conn) bool {
 	now := time.Now()
-
+	// 检验连接时长
 	if p.cfg.ConnMaxLifetime > 0 && now.Sub(cn.createdAt) >= p.cfg.ConnMaxLifetime {
 		return false
 	}
 	if p.cfg.ConnMaxIdleTime > 0 && now.Sub(cn.UsedAt()) >= p.cfg.ConnMaxIdleTime {
 		return false
 	}
-
+	// 检验连接是否有效
 	if connCheck(cn.netConn) != nil {
 		return false
 	}
-
+	// 更新连接的使用时间
 	cn.SetUsedAt(now)
 	return true
 }
