@@ -53,7 +53,7 @@ func ParseErrorReply(line []byte) error {
 //------------------------------------------------------------------------------
 
 type Reader struct {
-	rd *bufio.Reader
+	rd *bufio.Reader // buffered reader
 }
 
 func NewReader(rd io.Reader) *Reader {
@@ -66,10 +66,13 @@ func (r *Reader) Buffered() int {
 	return r.rd.Buffered()
 }
 
+// Peek 方法用于从缓冲区中读取指定数量的字节，但不会移动读取器的当前位置（即不会消耗这些字节）
 func (r *Reader) Peek(n int) ([]byte, error) {
 	return r.rd.Peek(n)
 }
 
+// Reset discards any buffered data, resets all state, and switches
+// the buffered reader to read from rd.
 func (r *Reader) Reset(rd io.Reader) {
 	r.rd.Reset(rd)
 }
@@ -128,6 +131,7 @@ func (r *Reader) ReadLine() ([]byte, error) {
 //   - there is a pending read error;
 //   - or line does not end with \r\n.
 func (r *Reader) readLine() ([]byte, error) {
+	// 从 bufio.Reader 缓冲区中读取数据，直到遇到换行符 \n 为止
 	b, err := r.rd.ReadSlice('\n')
 	if err != nil {
 		if err != bufio.ErrBufferFull {
@@ -182,6 +186,7 @@ func (r *Reader) ReadReply() (interface{}, error) {
 	return nil, fmt.Errorf("redis: can't parse %.100q", line)
 }
 
+// 从 line 的第二个字节开始（跳过第一个字节，表示数据类型标识符），将剩余部分转换为字符串 v
 func (r *Reader) readFloat(line []byte) (float64, error) {
 	v := string(line[1:])
 	switch string(line[1:]) {

@@ -40,6 +40,7 @@ type Options struct {
 
 	// Dialer creates new network connection and has priority over
 	// Network and Addr options.
+	// struct 里面也可以设置函数 , 可以用NewDialer函数来声明
 	Dialer func(ctx context.Context, network, addr string) (net.Conn, error)
 
 	// Hook that is called when new connection is established.
@@ -343,6 +344,9 @@ func setupTCPConn(u *url.URL) (*Options, error) {
 // getHostPortWithDefaults is a helper function that splits the url into
 // a host and a port. If the host is missing, it defaults to localhost
 // and if the port is missing, it defaults to 6379.
+// net.DialTCP / net.DialUDP  建立tcp 或者udp 连接
+// net.IPConn 建立ip 连接
+// net.DialUnix 本地进程间通信
 func getHostPortWithDefaults(u *url.URL) (string, string) {
 	host, port, err := net.SplitHostPort(u.Host)
 	if err != nil {
@@ -379,6 +383,7 @@ func (o *queryOptions) has(name string) bool {
 	return len(o.q[name]) > 0
 }
 
+// string 删除队列中 key = name 的元素，返回查到的 value
 func (o *queryOptions) string(name string) string {
 	vs := o.q[name]
 	if len(vs) == 0 {
@@ -388,6 +393,7 @@ func (o *queryOptions) string(name string) string {
 	return vs[len(vs)-1]
 }
 
+// strings 删除队列中 key = name 的元素，返回查到的所有 value 并没有什么差别
 func (o *queryOptions) strings(name string) []string {
 	vs := o.q[name]
 	delete(o.q, name)

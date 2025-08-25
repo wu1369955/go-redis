@@ -22,12 +22,15 @@ import (
 
 var errRingShardsDown = errors.New("redis: all ring shards are down")
 
-//------------------------------------------------------------------------------
-
+// ------------------------------------------------------------------------------
+// ConsistentHash 定义一致性哈希接口，用于将键分配到对应的分片节点
+// 实现该接口的类型需提供根据键获取目标分片的能力
 type ConsistentHash interface {
 	Get(string) string
 }
 
+// rendezvousWrapper 封装rendezvous.Rendezvous，实现ConsistentHash接口
+// 使用Rendezvous（最高随机权重）一致性哈希算法，将键映射到具体的分片节点
 type rendezvousWrapper struct {
 	*rendezvous.Rendezvous
 }
@@ -44,8 +47,10 @@ func newRendezvous(shards []string) ConsistentHash {
 
 // RingOptions are used to configure a ring client and should be
 // passed to NewRing.
+// RingOptions 配置Ring客户端的参数选项
+// 用于初始化分布式环客户端，包含分片地址、客户端创建函数、心跳频率等核心配置
 type RingOptions struct {
-	// Map of name => host:port addresses of ring shards.
+	// 分片名称到地址（host:port）的映射，标识各个Redis分片节点
 	Addrs map[string]string
 
 	// NewClient creates a shard client with provided options.
@@ -188,12 +193,17 @@ func (opt *RingOptions) clientOptions() *Options {
 
 //------------------------------------------------------------------------------
 
+// ringShard 表示分布式环中的一个Redis分片节点
+// 包含分片客户端实例、状态标识（是否宕机）及节点地址
 type ringShard struct {
-	Client *Client
-	down   int32
-	addr   string
+	Client *Client // 该分片对应的Redis客户端实例
+	down   int32   // 宕机状态计数器（超过阈值3标记为宕机）
+	addr   string  // 分片节点地址（host:port）
 }
 
+// newRingShard 根据配置创建一个新的Redis分片实例
+// 参数：opt-环配置选项，addr-分片节点地址
+// 返回：新的ringShard实例（包含客户端、地址等信息）
 func newRingShard(opt *RingOptions, addr string) *ringShard {
 	clopt := opt.clientOptions()
 	clopt.Addr = addr
@@ -214,16 +224,22 @@ func (shard *ringShard) String() string {
 	return fmt.Sprintf("%s is %s", shard.Client, state)
 }
 
+// IsDown 判断分片是否宕机（根据宕机计数器是否超过阈值3）
+// 返回：true表示分片已宕机，false表示存活
 func (shard *ringShard) IsDown() bool {
 	const threshold = 3
 	return atomic.LoadInt32(&shard.down) >= threshold
 }
 
+// IsUp 判断分片是否存活（与IsDown相反）
+// 返回：true表示分片存活，false表示已宕机
 func (shard *ringShard) IsUp() bool {
 	return !shard.IsDown()
 }
 
-// Vote votes to set shard state and returns true if state was changed.
+// Vote 更新分片的存活状态（投票机制）
+// 参数：up-是否存活（true为存活，false为异常）
+// 返回：状态是否发生变化（如从宕机恢复或首次达到宕机阈值）
 func (shard *ringShard) Vote(up bool) bool {
 	if up {
 		changed := shard.IsDown()
@@ -241,24 +257,28 @@ func (shard *ringShard) Vote(up bool) bool {
 
 //------------------------------------------------------------------------------
 
+// ringSharding 管理分布式环的所有分片节点
+// 负责分片的状态监控、动态调整（增删节点）、一致性哈希分配及负载均衡
 type ringSharding struct {
-	opt *RingOptions
+	opt *RingOptions // 环客户端的配置选项
 
-	mu        sync.RWMutex
-	shards    *ringShards
-	closed    bool
-	hash      ConsistentHash
-	numShard  int
-	onNewNode []func(rdb *Client)
+	mu        sync.RWMutex        // 读写锁，保护分片状态
+	shards    *ringShards         // 当前所有分片的集合
+	closed    bool                // 环是否已关闭
+	hash      ConsistentHash      // 一致性哈希实例，用于键到分片的映射
+	numShard  int                 // 当前存活的分片数量
+	onNewNode []func(rdb *Client) // 新节点加入时的回调函数
 
-	// ensures exclusive access to SetAddrs so there is no need
-	// to hold mu for the duration of potentially long shard creation
+	// 保证SetAddrs操作的互斥，避免长时间持有mu锁
 	setAddrsMu sync.Mutex
 }
 
+// ringShards 存储所有分片节点的集合
+// m: 分片名称到分片实例的映射（快速查找）
+// list: 分片实例列表（用于遍历）
 type ringShards struct {
-	m    map[string]*ringShard
-	list []*ringShard
+	m    map[string]*ringShard // 分片名称到实例的映射
+	list []*ringShard          // 分片实例列表（保持顺序）
 }
 
 func newRingSharding(opt *RingOptions) *ringSharding {
@@ -349,6 +369,8 @@ func (c *ringSharding) newRingShards(
 	return
 }
 
+// List 获取当前所有分片节点的列表（包含存活和宕机的节点）
+// 返回：分片实例列表（副本，避免并发修改影响）
 func (c *ringSharding) List() []*ringShard {
 	var list []*ringShard
 
@@ -362,6 +384,9 @@ func (c *ringSharding) List() []*ringShard {
 	return list
 }
 
+// Hash 通过一致性哈希算法计算键对应的分片名称
+// 参数：key-需要分配的键（自动处理哈希标签）
+// 返回：目标分片名称（空表示无存活分片）
 func (c *ringSharding) Hash(key string) string {
 	key = hashtag.Key(key)
 
@@ -377,6 +402,9 @@ func (c *ringSharding) Hash(key string) string {
 	return hash
 }
 
+// GetByKey 根据键获取对应的分片节点
+// 参数：key-需要分配的键（自动处理哈希标签）
+// 返回：目标分片实例及错误（若所有分片宕机或环已关闭）
 func (c *ringSharding) GetByKey(key string) (*ringShard, error) {
 	key = hashtag.Key(key)
 
@@ -398,6 +426,9 @@ func (c *ringSharding) GetByKey(key string) (*ringShard, error) {
 	return c.shards.m[shardName], nil
 }
 
+// GetByName 根据分片名称获取对应的分片节点
+// 参数：shardName-分片名称（空则随机获取）
+// 返回：目标分片实例
 func (c *ringSharding) GetByName(shardName string) (*ringShard, error) {
 	if shardName == "" {
 		return c.Random()
@@ -409,11 +440,14 @@ func (c *ringSharding) GetByName(shardName string) (*ringShard, error) {
 	return c.shards.m[shardName], nil
 }
 
+// Random 随机获取一个分片节点（通过生成随机键实现）
+// 返回：随机分片实例及错误（若所有分片宕机）
 func (c *ringSharding) Random() (*ringShard, error) {
 	return c.GetByKey(strconv.Itoa(rand.Int()))
 }
 
-// Heartbeat monitors state of each shard in the ring.
+// Heartbeat 心跳监控机制，定期检查分片节点的存活状态
+// 频率由frequency参数控制，通过Ping命令检测分片健康度，更新状态并触发重新平衡
 func (c *ringSharding) Heartbeat(ctx context.Context, frequency time.Duration) {
 	ticker := time.NewTicker(frequency)
 	defer ticker.Stop()
@@ -443,8 +477,9 @@ func (c *ringSharding) Heartbeat(ctx context.Context, frequency time.Duration) {
 	}
 }
 
-// rebalanceLocked removes dead shards from the Ring.
-// Requires c.mu locked.
+// rebalanceLocked 重新平衡分片（移除宕机节点）
+// 需持有c.mu写锁，遍历所有分片筛选存活节点，更新一致性哈希实例
+// 确保后续键分配仅使用存活的分片节点
 func (c *ringSharding) rebalanceLocked() {
 	if c.closed {
 		return
@@ -465,6 +500,8 @@ func (c *ringSharding) rebalanceLocked() {
 	c.numShard = len(liveShards)
 }
 
+// Len 获取当前存活的分片数量
+// 返回：存活分片的数量（0表示所有分片宕机）
 func (c *ringSharding) Len() int {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -472,6 +509,9 @@ func (c *ringSharding) Len() int {
 	return c.numShard
 }
 
+// Close 关闭环客户端并释放所有分片资源
+// 会关闭所有分片的客户端连接，标记环为已关闭状态
+// 返回：第一个关闭失败的错误（无则返回nil）
 func (c *ringSharding) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()

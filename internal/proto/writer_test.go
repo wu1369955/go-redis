@@ -26,7 +26,7 @@ func (t *MyType) MarshalBinary() ([]byte, error) {
 var _ = Describe("WriteBuffer", func() {
 	var buf *bytes.Buffer
 	var wr *proto.Writer
-
+	fmt.Println("Starting WriteBuffer tests...")
 	BeforeEach(func() {
 		buf = new(bytes.Buffer)
 		wr = proto.NewWriter(buf)
